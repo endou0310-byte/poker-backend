@@ -21,9 +21,8 @@ app.get('/health', (req, res) => {
   });
 });
 
-// planルーターはまだ一旦コメントアウト
-// const planRouter = require('./src/routes/plan');
-// app.use('/me', planRouter);
+const planRouter = require('./src/routes/plan');
+app.use('/me', planRouter);
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
