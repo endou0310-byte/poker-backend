@@ -1,11 +1,7 @@
-// server.js : PokerGPT backend (Railway)
-// - Google認証やプラン情報(/auth, /me) は既存ルータを使用
-// - 解析API: POST /analyze
-// - 追い質問API: POST /followup
-
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
+const pool = require("./src/db/pool");   // ← これを追加！
 
 const app = express();
 
@@ -299,6 +295,104 @@ app.post("/followup", async (req, res) => {
     return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
+
+/* =============================
+    hand history APIs
+=============================*/
+
+// 保存
+app.post("/history/save", async (req, res) => {
+  try {
+    const {
+      user_id,
+      handId,
+      snapshot,
+      evaluation,
+      conversation,
+      markdown
+    } = req.body;
+
+    if (!user_id || !handId) {
+      return res.status(400).json({ ok: false, error: "missing_parameters" });
+    }
+
+    const result = await pool.query(
+      `INSERT INTO hand_histories
+       (user_id, hand_id, snapshot, evaluation, conversation, markdown)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id`,
+      [
+        user_id,
+        handId,
+        snapshot ?? null,
+        evaluation ?? null,
+        conversation ?? null,
+        markdown ?? null,
+      ]
+    );
+
+    res.json({ ok: true, id: result.rows[0].id });
+
+  } catch (err) {
+    console.error("POST /history/save error:", err);
+    res.status(500).json({ ok: false, error: "server_error" });
+  }
+});
+
+// 一覧
+app.get("/history/list", async (req, res) => {
+  try {
+    const { user_id } = req.query;
+
+    if (!user_id) {
+      return res.status(400).json({ ok: false, error: "missing_user_id" });
+    }
+
+    const result = await pool.query(
+      `SELECT id, hand_id, created_at, snapshot
+       FROM hand_histories
+       WHERE user_id = $1
+       ORDER BY created_at DESC
+       LIMIT 50`,
+      [user_id]
+    );
+
+    res.json({ ok: true, items: result.rows });
+
+  } catch (err) {
+    console.error("GET /history/list error:", err);
+    res.status(500).json({ ok: false, error: "server_error" });
+  }
+});
+
+// 詳細
+app.get("/history/detail", async (req, res) => {
+  try {
+    const { id } = req.query;
+
+    if (!id) {
+      return res.status(400).json({ ok: false, error: "missing_id" });
+    }
+
+    const result = await pool.query(
+      `SELECT *
+       FROM hand_histories
+       WHERE id = $1`,
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.json({ ok: false, error: "not_found" });
+    }
+
+    res.json({ ok: true, history: result.rows[0] });
+
+  } catch (err) {
+    console.error("GET /history/detail error:", err);
+    res.status(500).json({ ok: false, error: "server_error" });
+  }
+});
+
 
 // ===== 起動 =====
 const PORT = process.env.PORT || 5000;
