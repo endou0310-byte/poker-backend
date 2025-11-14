@@ -343,27 +343,35 @@ app.post("/history/save", async (req, res) => {
 app.get("/history/list", async (req, res) => {
   try {
     const { user_id } = req.query;
-
     if (!user_id) {
       return res.status(400).json({ ok: false, error: "missing_user_id" });
     }
 
     const result = await pool.query(
-      `SELECT id, hand_id, created_at, snapshot
-       FROM hand_histories
-       WHERE user_id = $1
-       ORDER BY created_at DESC
-       LIMIT 50`,
+      `
+      SELECT id, hand_id, created_at, snapshot
+      FROM hand_histories
+      WHERE user_id = $1
+      ORDER BY created_at DESC
+      LIMIT 100
+      `,
       [user_id]
     );
 
-    res.json({ ok: true, items: result.rows });
-
+    res.json({
+      ok: true,
+      items: result.rows,
+    });
   } catch (err) {
     console.error("GET /history/list error:", err);
-    res.status(500).json({ ok: false, error: "server_error" });
+    res.status(500).json({
+      ok: false,
+      error: "server_error",
+      detail: err.message,        // ← エラー内容を返す
+    });
   }
 });
+
 
 // 詳細
 app.get("/history/detail", async (req, res) => {
