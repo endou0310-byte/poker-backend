@@ -28,13 +28,14 @@ router.get("/list", async (req, res) => {
 
     return res.json({
       ok: true,
-      items: result.rows
+      histories: result.rows   // ← ココだけ修正！
     });
   } catch (err) {
     console.error("/history/list error:", err);
     return res.status(500).json({ ok: false });
   }
 });
+
 
 
 // ======================
@@ -68,10 +69,11 @@ router.get("/detail", async (req, res) => {
       return res.json({ ok: false, error: "not_found" });
     }
 
-    return res.json({
-      ok: true,
-      history: result.rows[0]
-    });
+return res.json({
+  ok: true,
+  histories: result.rows
+});
+
   } catch (err) {
     console.error("/history/detail error:", err);
     return res.status(500).json({ ok: false });
