@@ -17,15 +17,13 @@ app.use(
 // ===== JSON =====
 app.use(express.json());
 
-// ===== 既存ルータ(auth / me / history) =====
+// ===== 既存ルータ(auth / me) =====
 const authRouter = require("./src/routes/auth");
 const planRouter = require("./src/routes/plan");
-const historyRouter = require("./src/routes/history");   // ← 追加
 
 app.use("/auth", authRouter);
 app.use("/me", planRouter);
-app.use("/history", historyRouter);                      // ← 追加
-
+// /history 系はこのファイルの下のほうに直書きしているので router は使わない
 
 // ===== healthcheck =====
 app.get("/health", (_req, res) => {
