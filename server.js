@@ -21,9 +21,12 @@ app.use(express.json());
 const authRouter = require("./src/routes/auth");
 const planRouter = require("./src/routes/plan");
 
+const historyRouter = require("./src/routes/history");
+
 app.use("/auth", authRouter);
-app.use("/me", planRouter);
-// /history 系はこのファイルの下のほうに直書きしているので router は使わない
+app.use("/plan", planRouter);
+app.use("/history", historyRouter);   // ★これを追加
+
 
 // ===== healthcheck =====
 app.get("/health", (_req, res) => {
