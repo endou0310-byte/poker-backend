@@ -1,18 +1,21 @@
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
-const pool = require("./src/db/pool");   // ← これを追加！
+const pool = require("./src/db/pool");
 
 const app = express();
 
 // ===== CORS =====
-app.use(
-  cors({
-    origin: "*", // 必要に応じて本番ドメインに絞る
-    methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-  })
-);
+const corsOptions = {
+  origin: "http://localhost:5173", // 開発中: フロントのオリジン
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+};
+
+app.use(cors(corsOptions));
+// プリフライト(OPTIONS)も必ず同じ設定で返す
+app.options("*", cors(corsOptions));
+
 
 // ===== JSON =====
 app.use(express.json());
@@ -21,12 +24,10 @@ app.use(express.json());
 const authRouter = require("./src/routes/auth");
 const planRouter = require("./src/routes/plan");
 
-const historyRouter = require("./src/routes/history");
-
 app.use("/auth", authRouter);
 app.use("/plan", planRouter);
-app.use("/history", historyRouter);   // ★これを追加
-
+// /history 系はこのファイルの後半で直書きしているので、
+// ここでの historyRouter は不要
 
 // ===== healthcheck =====
 app.get("/health", (_req, res) => {
