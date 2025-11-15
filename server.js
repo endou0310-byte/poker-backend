@@ -17,7 +17,7 @@ app.use(
 // ===== JSON =====
 app.use(express.json());
 
-// ===== 既存ルータ(auth / me) =====
+// ===== 既存ルータ(auth / me / history) =====
 const authRouter = require("./src/routes/auth");
 const planRouter = require("./src/routes/plan");
 const historyRouter = require("./src/routes/history");
@@ -26,8 +26,6 @@ app.use("/auth", authRouter);
 app.use("/me", planRouter);
 app.use("/history", historyRouter);
 
-const historyRouter = require("./src/routes/history");
-app.use("/history", historyRouter);
 
 
 // ===== healthcheck =====
