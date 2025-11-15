@@ -14,8 +14,8 @@ const corsOptions = {
 
 app.use(cors(corsOptions));
 // プリフライト(OPTIONS)も必ず同じ設定で返す
-app.options("*", cors(corsOptions));
-
+// ※ Express v5 + path-to-regexp では "*" がエラーになるため、正規表現で全パスにマッチさせる
+app.options(/.*/, cors(corsOptions));
 
 // ===== JSON =====
 app.use(express.json());
