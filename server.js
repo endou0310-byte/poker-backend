@@ -24,6 +24,10 @@ const planRouter = require("./src/routes/plan");
 app.use("/auth", authRouter);
 app.use("/me", planRouter);
 
+const historyRouter = require("./src/routes/history");
+app.use("/history", historyRouter);
+
+
 // ===== healthcheck =====
 app.get("/health", (_req, res) => {
   res.json({
