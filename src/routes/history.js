@@ -1,6 +1,7 @@
-const express = require("express");
+import express from "express";
+import pool from "../db/pool.js";
+
 const router = express.Router();
-const pool = require("../db/pool");
 
 // ======================
 // 1) 履歴一覧
@@ -80,4 +81,5 @@ return res.json({
   }
 });
 
-module.exports = router;
+export default router;
+
