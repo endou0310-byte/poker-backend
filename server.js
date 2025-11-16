@@ -310,25 +310,33 @@ app.post("/history/save", async (req, res) => {
   try {
     const {
       user_id,
-      handId,
+      hand_id,
+      handId,           // ← どちらで来ても受け取れるようにする
       snapshot,
       evaluation,
       conversation,
-      markdown
+      markdown,
     } = req.body;
 
-    if (!user_id || !handId) {
-      return res.status(400).json({ ok: false, error: "missing_parameters" });
+    // hand_id or handId のどちらかに値があれば OK
+    const normalizedHandId = hand_id ?? handId;
+
+    if (!user_id || !normalizedHandId) {
+      return res
+        .status(400)
+        .json({ ok: false, error: "missing_parameters" });
     }
 
     const result = await pool.query(
-      `INSERT INTO hand_histories
-       (user_id, hand_id, snapshot, evaluation, conversation, markdown)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING id`,
+      `
+      INSERT INTO hand_histories
+        (user_id, hand_id, snapshot, evaluation, conversation, markdown)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING id
+      `,
       [
         user_id,
-        handId,
+        normalizedHandId,
         snapshot ?? null,
         evaluation ?? null,
         conversation ?? null,
@@ -337,12 +345,12 @@ app.post("/history/save", async (req, res) => {
     );
 
     res.json({ ok: true, id: result.rows[0].id });
-
   } catch (err) {
     console.error("POST /history/save error:", err);
     res.status(500).json({ ok: false, error: "server_error" });
   }
 });
+
 
 // 一覧
 app.get("/history/list", async (req, res) => {
