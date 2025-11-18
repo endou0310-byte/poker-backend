@@ -35,7 +35,7 @@ function getMonthRange() {
   return { start, end };
 }
 
-router.get('/plan', async (req, res) => {
+router.get('/', async (req, res) => {
   const userId = req.query.user_id;
 
   if (!userId) {
