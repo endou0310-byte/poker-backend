@@ -1,32 +1,176 @@
-// server.js : PokerGPT backend (Railway)
-// - Google認証やプラン情報(/auth, /me) は既存ルータを使用
-// - 解析API: POST /analyze
-// - 追い質問API: POST /followup
-
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
+const pool = require("./src/db/pool");
+
+// ===== Stripe 設定 =====
+const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || "";
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || "";
+const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
+
+// プランごとの PriceID（Stripe ダッシュボードで発行したものを .env に入れる）
+const STRIPE_PRICE_BASIC = process.env.STRIPE_PRICE_BASIC || "";
+const STRIPE_PRICE_PRO = process.env.STRIPE_PRICE_PRO || "";
+const STRIPE_PRICE_PREMIUM = process.env.STRIPE_PRICE_PREMIUM || "";
+
+// server 側で plan ↔ priceId を管理する
+const PLAN_TO_PRICE = {
+  basic: STRIPE_PRICE_BASIC,
+  pro: STRIPE_PRICE_PRO,
+  premium: STRIPE_PRICE_PREMIUM,
+};
+const PRICE_TO_PLAN = Object.fromEntries(
+  Object.entries(PLAN_TO_PRICE).map(([plan, price]) => [price, plan])
+);
+
+const stripe =
+  STRIPE_SECRET_KEY && STRIPE_WEBHOOK_SECRET
+    ? require("stripe")(STRIPE_SECRET_KEY)
+    : null;
 
 const app = express();
 
+
 // ===== CORS =====
-app.use(
-  cors({
-    origin: "*", // 必要に応じて本番ドメインに絞る
-    methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-  })
-);
+const corsOptions = {
+  origin: "http://localhost:5173", // 開発中: フロントのオリジン
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+};
+
+app.use(cors(corsOptions));
+// プリフライト(OPTIONS)も必ず同じ設定で返す
+// ※ Express v5 + path-to-regexp では "*" がエラーになるため、正規表現で全パスにマッチさせる
+app.options(/.*/, cors(corsOptions));
+
+/**
+ * Stripe Webhook（raw body が必要なので express.json より前に定義）
+ * ここでは checkout.session.completed が来たら subscriptions に active プランを登録します。
+ */
+if (stripe) {
+  app.post(
+    "/stripe/webhook",
+    express.raw({ type: "application/json" }),
+    async (req, res) => {
+      const sig = req.headers["stripe-signature"];
+
+      let event;
+      try {
+        event = stripe.webhooks.constructEvent(
+          req.body,
+          sig,
+          STRIPE_WEBHOOK_SECRET
+        );
+      } catch (err) {
+        console.error("[stripe/webhook] signature error:", err.message);
+        return res.status(400).send(`Webhook Error: ${err.message}`);
+      }
+
+      try {
+        switch (event.type) {
+          case "checkout.session.completed": {
+            const session = event.data.object;
+            const userId = session.metadata?.user_id;
+            const planFromMeta = session.metadata?.plan || null;
+
+            // line_items は expand 指定がないと取れないので、
+            // 基本的には metadata の plan を信頼する形にしておく
+            const plan = planFromMeta;
+
+            if (userId && plan) {
+              await pool.query(
+                `INSERT INTO subscriptions
+                   (user_id, plan, status, store, started_at, purchase_token)
+                 VALUES ($1, $2, 'active', 'stripe', NOW(), $3)`,
+                [userId, plan, session.id]
+              );
+              console.log(
+                "[stripe/webhook] subscription inserted:",
+                userId,
+                plan
+              );
+            } else {
+              console.warn(
+                "[stripe/webhook] missing user_id or plan in metadata"
+              );
+            }
+            break;
+          }
+
+          // 今後必要なら invoice.payment_failed 等もここでハンドリング
+          default:
+            // 特に処理不要のイベントはそのまま流す
+            break;
+        }
+
+        res.json({ received: true });
+      } catch (err) {
+        console.error("[stripe/webhook] handler error:", err);
+        res.status(500).send("Webhook handler error");
+      }
+    }
+  );
+}
 
 // ===== JSON =====
 app.use(express.json());
+
 
 // ===== 既存ルータ(auth / me) =====
 const authRouter = require("./src/routes/auth");
 const planRouter = require("./src/routes/plan");
 
 app.use("/auth", authRouter);
-app.use("/me", planRouter);
+app.use("/plan", planRouter);
+// /history 系はこのファイルの後半で直書きしているので、
+// ここでの historyRouter は不要
+
+// ===== Stripe: Checkout セッション作成 =====
+app.post("/stripe/create-checkout-session", async (req, res) => {
+  try {
+    if (!stripe) {
+      return res
+        .status(500)
+        .json({ ok: false, error: "stripe_not_configured" });
+    }
+
+    const { user_id, email, plan } = req.body || {};
+    if (!user_id || !plan) {
+      return res.status(400).json({ ok: false, error: "bad_request" });
+    }
+
+    const priceId = PLAN_TO_PRICE[plan];
+    if (!priceId) {
+      return res.status(400).json({ ok: false, error: "unknown_plan" });
+    }
+
+    const session = await stripe.checkout.sessions.create({
+      mode: "subscription",
+      payment_method_types: ["card"],
+      customer_email: email || undefined,
+      line_items: [
+        {
+          price: priceId,
+          quantity: 1,
+        },
+      ],
+      metadata: {
+        user_id,
+        plan,
+      },
+      success_url: `${FRONTEND_URL}/stripe-success.html?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${FRONTEND_URL}/stripe-cancel.html`,
+    });
+
+    return res.json({ ok: true, url: session.url });
+  } catch (err) {
+    console.error("[/stripe/create-checkout-session] error:", err);
+    return res
+      .status(500)
+      .json({ ok: false, error: "stripe_session_error" });
+  }
+});
+
 
 // ===== healthcheck =====
 app.get("/health", (_req, res) => {
@@ -47,6 +191,81 @@ if (!OPENAI_API_KEY) {
 }
 
 // Node18+ なら fetch はグローバルに存在する前提で使う
+
+// ===== プラン設定（server.js 用。plan.js と同じ内容をここにも定義） =====
+const PLAN_CONFIG = {
+  free: {
+    limit_per_month: 3,
+    followups_per_hand: 1,
+    ads_enabled: true,
+  },
+  basic: {
+    limit_per_month: 30,
+    followups_per_hand: 3,
+    ads_enabled: false,
+  },
+  pro: {
+    limit_per_month: 100,
+    followups_per_hand: 10,
+    ads_enabled: false,
+  },
+  premium: {
+    limit_per_month: null, // 無制限
+    followups_per_hand: null, // 無制限
+    ads_enabled: false,
+  },
+};
+
+function getMonthRange() {
+  const now = new Date();
+  const start = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0);
+  const end = new Date(now.getFullYear(), now.getMonth() + 1, 1, 0, 0, 0);
+  return { start, end };
+}
+
+// ユーザーのプラン情報を取得（subscriptions + PLAN_CONFIG）
+async function getUserPlanInfo(userId) {
+  // 最新の active サブスクを1件取得
+  const subRes = await pool.query(
+    `SELECT plan, status, limit_per_month
+       FROM subscriptions
+      WHERE user_id = $1
+        AND status = 'active'
+      ORDER BY started_at DESC
+      LIMIT 1`,
+    [userId]
+  );
+
+  let plan = "free";
+  let status = "none";
+  let limitPerMonthOverride = null;
+
+  if (subRes.rowCount > 0) {
+    const row = subRes.rows[0];
+    plan = row.plan || "free";
+    status = row.status || "active";
+    limitPerMonthOverride =
+      row.limit_per_month !== undefined ? row.limit_per_month : null;
+  }
+
+  const cfg = PLAN_CONFIG[plan] || PLAN_CONFIG.free;
+  const baseLimitPerMonth = cfg.limit_per_month; // number | null
+  const followupsPerHand = cfg.followups_per_hand; // number | null
+  const adsEnabled = !!cfg.ads_enabled;
+
+  const effectiveLimitPerMonth =
+    limitPerMonthOverride !== null && limitPerMonthOverride !== undefined
+      ? limitPerMonthOverride
+      : baseLimitPerMonth;
+
+  return {
+    plan,
+    status,
+    limit_per_month: effectiveLimitPerMonth,
+    followups_per_hand: followupsPerHand,
+    ads_enabled: adsEnabled,
+  };
+}
 
 const EVAL_SYSTEM = `
 あなたはプロフェッショナルのNo-Limit Hold’em コーチ兼アナリストです。
@@ -160,6 +379,49 @@ app.post("/analyze", async (req, res) => {
   try {
     console.log("[/analyze] payload keys:", Object.keys(payload || {}));
 
+    const userId = payload.user_id;
+    const handId = payload.hand_id || payload.handId || null;
+
+    if (!userId) {
+      return res.status(400).json({
+        ok: false,
+        source: "server",
+        error: "missing_user_id",
+      });
+    }
+
+    // プラン情報 + 今月の使用状況を取得
+    const planInfo = await getUserPlanInfo(userId);
+    const { limit_per_month: limitPerMonth } = planInfo;
+
+    let usedThisMonth = 0;
+    if (limitPerMonth !== null && limitPerMonth !== undefined) {
+      const { start, end } = getMonthRange();
+      const usageRes = await pool.query(
+        `SELECT COUNT(*)::int AS cnt
+           FROM usage_logs
+          WHERE user_id = $1
+            AND action_type = 'analyze'
+            AND created_at >= $2
+            AND created_at < $3`,
+        [userId, start, end]
+      );
+      usedThisMonth = usageRes.rows[0].cnt;
+
+      if (usedThisMonth >= limitPerMonth) {
+        return res.status(403).json({
+          ok: false,
+          source: "plan",
+          error: "analysis_limit_exceeded",
+          detail: {
+            plan: planInfo.plan,
+            limit_per_month: limitPerMonth,
+            used_this_month: usedThisMonth,
+          },
+        });
+      }
+    }
+
     const r = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -204,12 +466,20 @@ app.post("/analyze", async (req, res) => {
     }
 
     const data = await r.json();
-    const content = data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content
-      ? String(data.choices[0].message.content).trim()
-      : "";
+    const content =
+      data &&
+      data.choices &&
+      data.choices[0] &&
+      data.choices[0].message &&
+      data.choices[0].message.content
+        ? String(data.choices[0].message.content).trim()
+        : "";
 
     if (!content) {
-      console.error("[/analyze] missing content:", JSON.stringify(data).slice(0, 400));
+      console.error(
+        "[/analyze] missing content:",
+        JSON.stringify(data).slice(0, 400)
+      );
       return res.status(502).json({
         ok: false,
         source: "openai",
@@ -217,10 +487,28 @@ app.post("/analyze", async (req, res) => {
       });
     }
 
+    // 使用ログを1件追加（解析成功時のみ）
+    try {
+      await pool.query(
+        `INSERT INTO usage_logs (user_id, action_type, hand_id)
+         VALUES ($1, 'analyze', $2)`,
+        [userId, handId]
+      );
+      usedThisMonth += 1;
+    } catch (e) {
+      console.error("[/analyze] failed to insert usage_logs:", e);
+      // ログ挿入失敗は解析結果自体には影響させない
+    }
+
     // ここでは JSON にパースせず、テキストとしてそのまま返す
     return res.json({
       ok: true,
       text: content,
+      usage: {
+        plan: planInfo.plan,
+        limit_per_month: limitPerMonth,
+        used_this_month: usedThisMonth,
+      },
     });
   } catch (e) {
     console.error("[/analyze] server exception:", e);
@@ -233,7 +521,7 @@ app.post("/analyze", async (req, res) => {
 });
 
 
-// ===== /followup: 追い質問（1回まで想定・ロジックはフロントで制御） =====
+// ===== /followup: 追い質問 =====
 
 const FU_SYS = `
 あなたは同じポーカーコーチです。
@@ -251,9 +539,48 @@ type Followup = {
 
 app.post("/followup", async (req, res) => {
   try {
-    const { snapshot, evaluation, question } = req.body || {};
-    if (!snapshot || !question || typeof question !== "string") {
+    const { snapshot, evaluation, question, user_id, hand_id, handId } =
+      req.body || {};
+
+    const normalizedHandId = hand_id ?? handId ?? null;
+
+    if (
+      !snapshot ||
+      !question ||
+      typeof question !== "string" ||
+      !user_id ||
+      !normalizedHandId
+    ) {
       return res.status(400).json({ ok: false, error: "bad_request" });
+    }
+
+    // プラン情報取得（1ハンドあたりの追い質問上限）
+    const planInfo = await getUserPlanInfo(user_id);
+    const followupsPerHand = planInfo.followups_per_hand;
+
+    let usedForThisHand = 0;
+    if (followupsPerHand !== null && followupsPerHand !== undefined) {
+      const usageRes = await pool.query(
+        `SELECT COUNT(*)::int AS cnt
+           FROM usage_logs
+          WHERE user_id = $1
+            AND hand_id = $2
+            AND action_type = 'followup'`,
+        [user_id, normalizedHandId]
+      );
+      usedForThisHand = usageRes.rows[0].cnt;
+
+      if (usedForThisHand >= followupsPerHand) {
+        return res.status(403).json({
+          ok: false,
+          error: "followup_limit_exceeded",
+          detail: {
+            plan: planInfo.plan,
+            followups_per_hand: followupsPerHand,
+            used_for_this_hand: usedForThisHand,
+          },
+        });
+      }
     }
 
     const r = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -293,12 +620,145 @@ app.post("/followup", async (req, res) => {
       result = { refusal: false, message: content };
     }
 
-    return res.json({ ok: true, result });
+    // 追い質問の使用ログ
+    try {
+      await pool.query(
+        `INSERT INTO usage_logs (user_id, action_type, hand_id)
+         VALUES ($1, 'followup', $2)`,
+        [user_id, normalizedHandId]
+      );
+      usedForThisHand += 1;
+    } catch (e) {
+      console.error("[/followup] failed to insert usage_logs:", e);
+    }
+
+    return res.json({
+      ok: true,
+      result,
+      followup_usage: {
+        plan: planInfo.plan,
+        followups_per_hand: followupsPerHand,
+        used_for_this_hand: usedForThisHand,
+      },
+    });
   } catch (e) {
     console.error("[/followup] error:", e);
     return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
+
+/* =============================
+    hand history APIs
+=============================*/
+
+// 保存
+app.post("/history/save", async (req, res) => {
+  try {
+    const {
+      user_id,
+      hand_id,
+      handId, // ← どちらで来ても受け取れるようにする
+      snapshot,
+      evaluation,
+      conversation,
+      markdown,
+    } = req.body;
+
+    // hand_id or handId のどちらかに値があれば OK
+    const normalizedHandId = hand_id ?? handId;
+
+    if (!user_id || !normalizedHandId) {
+      return res
+        .status(400)
+        .json({ ok: false, error: "missing_parameters" });
+    }
+
+    const result = await pool.query(
+      `
+      INSERT INTO hand_histories
+        (user_id, hand_id, snapshot, evaluation, conversation, markdown)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING id
+      `,
+      [
+        user_id,
+        normalizedHandId,
+        snapshot ?? null,
+        evaluation ?? null,
+        conversation ?? null,
+        markdown ?? null,
+      ]
+    );
+
+    res.json({ ok: true, id: result.rows[0].id });
+  } catch (err) {
+    console.error("POST /history/save error:", err);
+    res.status(500).json({ ok: false, error: "server_error" });
+  }
+});
+
+
+// 一覧
+app.get("/history/list", async (req, res) => {
+  try {
+    const { user_id } = req.query;
+    if (!user_id) {
+      return res.status(400).json({ ok: false, error: "missing_user_id" });
+    }
+
+    const result = await pool.query(
+      `
+      SELECT id, hand_id, created_at, snapshot
+      FROM hand_histories
+      WHERE user_id = $1
+      ORDER BY created_at DESC
+      LIMIT 100
+      `,
+      [user_id]
+    );
+
+    res.json({
+      ok: true,
+      items: result.rows,
+    });
+  } catch (err) {
+    console.error("GET /history/list error:", err);
+    res.status(500).json({
+      ok: false,
+      error: "server_error",
+      detail: err.message, // ← エラー内容を返す
+    });
+  }
+});
+
+
+// 詳細
+app.get("/history/detail", async (req, res) => {
+  try {
+    const { id } = req.query;
+
+    if (!id) {
+      return res.status(400).json({ ok: false, error: "missing_id" });
+    }
+
+    const result = await pool.query(
+      `SELECT *
+       FROM hand_histories
+       WHERE id = $1`,
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.json({ ok: false, error: "not_found" });
+    }
+
+    res.json({ ok: true, history: result.rows[0] });
+  } catch (err) {
+    console.error("GET /history/detail error:", err);
+    res.status(500).json({ ok: false, error: "server_error" });
+  }
+});
+
 
 // ===== 起動 =====
 const PORT = process.env.PORT || 5000;

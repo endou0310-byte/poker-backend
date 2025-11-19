@@ -72,15 +72,18 @@ router.post('/google', async (req, res) => {
 
     const userRow = result.rows[0];
 
-    // 3. クライアントに返す
-    //    これをアプリ側で保存して /me/plan?user_id=... に渡す
-    return res.json({
-      ok: true,
-      user_id: userRow.id,
-      email: userRow.email,
-      display_name: userRow.display_name,
-      is_new: false
-    });
+// 3. クライアントに返す
+//    これをアプリ側で保存して /me/plan?user_id=... に渡す
+return res.json({
+  ok: true,
+  user: {
+    id: userRow.id,
+    email: userRow.email,
+    display_name: userRow.display_name
+  },
+  is_new: false
+});
+
 
   } catch (err) {
     console.error('/auth/google error:', err);
