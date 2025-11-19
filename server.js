@@ -3,7 +3,33 @@ const express = require("express");
 const cors = require("cors");
 const pool = require("./src/db/pool");
 
+// ===== Stripe 設定 =====
+const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || "";
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || "";
+const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
+
+// プランごとの PriceID（Stripe ダッシュボードで発行したものを .env に入れる）
+const STRIPE_PRICE_BASIC = process.env.STRIPE_PRICE_BASIC || "";
+const STRIPE_PRICE_PRO = process.env.STRIPE_PRICE_PRO || "";
+const STRIPE_PRICE_PREMIUM = process.env.STRIPE_PRICE_PREMIUM || "";
+
+// server 側で plan ↔ priceId を管理する
+const PLAN_TO_PRICE = {
+  basic: STRIPE_PRICE_BASIC,
+  pro: STRIPE_PRICE_PRO,
+  premium: STRIPE_PRICE_PREMIUM,
+};
+const PRICE_TO_PLAN = Object.fromEntries(
+  Object.entries(PLAN_TO_PRICE).map(([plan, price]) => [price, plan])
+);
+
+const stripe =
+  STRIPE_SECRET_KEY && STRIPE_WEBHOOK_SECRET
+    ? require("stripe")(STRIPE_SECRET_KEY)
+    : null;
+
 const app = express();
+
 
 // ===== CORS =====
 const corsOptions = {
@@ -17,8 +43,78 @@ app.use(cors(corsOptions));
 // ※ Express v5 + path-to-regexp では "*" がエラーになるため、正規表現で全パスにマッチさせる
 app.options(/.*/, cors(corsOptions));
 
+/**
+ * Stripe Webhook（raw body が必要なので express.json より前に定義）
+ * ここでは checkout.session.completed が来たら subscriptions に active プランを登録します。
+ */
+if (stripe) {
+  app.post(
+    "/stripe/webhook",
+    express.raw({ type: "application/json" }),
+    async (req, res) => {
+      const sig = req.headers["stripe-signature"];
+
+      let event;
+      try {
+        event = stripe.webhooks.constructEvent(
+          req.body,
+          sig,
+          STRIPE_WEBHOOK_SECRET
+        );
+      } catch (err) {
+        console.error("[stripe/webhook] signature error:", err.message);
+        return res.status(400).send(`Webhook Error: ${err.message}`);
+      }
+
+      try {
+        switch (event.type) {
+          case "checkout.session.completed": {
+            const session = event.data.object;
+            const userId = session.metadata?.user_id;
+            const planFromMeta = session.metadata?.plan || null;
+
+            // line_items は expand 指定がないと取れないので、
+            // 基本的には metadata の plan を信頼する形にしておく
+            const plan = planFromMeta;
+
+            if (userId && plan) {
+              await pool.query(
+                `INSERT INTO subscriptions
+                   (user_id, plan, status, store, started_at, purchase_token)
+                 VALUES ($1, $2, 'active', 'stripe', NOW(), $3)`,
+                [userId, plan, session.id]
+              );
+              console.log(
+                "[stripe/webhook] subscription inserted:",
+                userId,
+                plan
+              );
+            } else {
+              console.warn(
+                "[stripe/webhook] missing user_id or plan in metadata"
+              );
+            }
+            break;
+          }
+
+          // 今後必要なら invoice.payment_failed 等もここでハンドリング
+          default:
+            // 特に処理不要のイベントはそのまま流す
+            break;
+        }
+
+        res.json({ received: true });
+      } catch (err) {
+        console.error("[stripe/webhook] handler error:", err);
+        res.status(500).send("Webhook handler error");
+      }
+    }
+  );
+}
+
 // ===== JSON =====
 app.use(express.json());
+
 
 // ===== 既存ルータ(auth / me) =====
 const authRouter = require("./src/routes/auth");
@@ -28,6 +124,53 @@ app.use("/auth", authRouter);
 app.use("/plan", planRouter);
 // /history 系はこのファイルの後半で直書きしているので、
 // ここでの historyRouter は不要
+
+// ===== Stripe: Checkout セッション作成 =====
+app.post("/stripe/create-checkout-session", async (req, res) => {
+  try {
+    if (!stripe) {
+      return res
+        .status(500)
+        .json({ ok: false, error: "stripe_not_configured" });
+    }
+
+    const { user_id, email, plan } = req.body || {};
+    if (!user_id || !plan) {
+      return res.status(400).json({ ok: false, error: "bad_request" });
+    }
+
+    const priceId = PLAN_TO_PRICE[plan];
+    if (!priceId) {
+      return res.status(400).json({ ok: false, error: "unknown_plan" });
+    }
+
+    const session = await stripe.checkout.sessions.create({
+      mode: "subscription",
+      payment_method_types: ["card"],
+      customer_email: email || undefined,
+      line_items: [
+        {
+          price: priceId,
+          quantity: 1,
+        },
+      ],
+      metadata: {
+        user_id,
+        plan,
+      },
+      success_url: `${FRONTEND_URL}/stripe-success.html?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${FRONTEND_URL}/stripe-cancel.html`,
+    });
+
+    return res.json({ ok: true, url: session.url });
+  } catch (err) {
+    console.error("[/stripe/create-checkout-session] error:", err);
+    return res
+      .status(500)
+      .json({ ok: false, error: "stripe_session_error" });
+  }
+});
+
 
 // ===== healthcheck =====
 app.get("/health", (_req, res) => {
