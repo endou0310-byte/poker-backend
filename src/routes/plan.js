@@ -18,7 +18,7 @@ const PLAN_CONFIG = {
   },
   pro: {
     limit_per_month: 100,
-    followups_per_hand: 10,
+    followups_per_hand: 3,
     ads_enabled: false,
   },
   premium: {
