@@ -697,38 +697,50 @@ app.post("/history/save", async (req, res) => {
   }
 });
 
-// =============================
-//   conversation 更新API（★追加）
-// =============================
+// ================================
+// conversation append API（★新規追加）
+// ================================
 app.post("/history/update-conversation", async (req, res) => {
   try {
-    const { id, conversation } = req.body;
+    const { user_id, hand_id, conversation } = req.body || {};
 
-    if (!id || !conversation) {
-      return res.status(400).json({
-        ok: false,
-        error: "missing_parameters",
-      });
+    if (!user_id || !hand_id || !Array.isArray(conversation)) {
+      return res.status(400).json({ ok: false, error: "bad_request" });
     }
 
-    await pool.query(
-      `
-      UPDATE hand_histories
-         SET conversation = $1
-       WHERE id = $2
-      `,
-      [conversation, id]
+    // 既存 conversation を取得
+    const oldRes = await pool.query(
+      `SELECT conversation
+         FROM hand_histories
+        WHERE user_id = $1 AND hand_id = $2
+        ORDER BY id DESC
+        LIMIT 1`,
+      [user_id, hand_id]
     );
 
-    return res.json({ ok: true });
-  } catch (e) {
-    console.error("[/history/update-conversation] error:", e);
-    return res.status(500).json({
-      ok: false,
-      error: String(e?.message || e),
-    });
+    let oldConv = [];
+    if (oldRes.rowCount > 0 && Array.isArray(oldRes.rows[0].conversation)) {
+      oldConv = oldRes.rows[0].conversation;
+    }
+
+    // 会話を追加結合
+    const newConv = [...oldConv, ...conversation];
+
+    // UPDATE
+    await pool.query(
+      `UPDATE hand_histories
+          SET conversation = $1
+        WHERE user_id = $2 AND hand_id = $3`,
+      [newConv, user_id, hand_id]
+    );
+
+    return res.json({ ok: true, conversation: newConv });
+  } catch (err) {
+    console.error("POST /history/update-conversation error:", err);
+    return res.status(500).json({ ok: false, error: "server_error" });
   }
 });
+
 
 // 一覧
 app.get("/history/list", async (req, res) => {
