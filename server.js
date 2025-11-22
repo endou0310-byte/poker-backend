@@ -697,6 +697,38 @@ app.post("/history/save", async (req, res) => {
   }
 });
 
+// =============================
+//   conversation 更新API（★追加）
+// =============================
+app.post("/history/update-conversation", async (req, res) => {
+  try {
+    const { id, conversation } = req.body;
+
+    if (!id || !conversation) {
+      return res.status(400).json({
+        ok: false,
+        error: "missing_parameters",
+      });
+    }
+
+    await pool.query(
+      `
+      UPDATE hand_histories
+         SET conversation = $1
+       WHERE id = $2
+      `,
+      [conversation, id]
+    );
+
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error("[/history/update-conversation] error:", e);
+    return res.status(500).json({
+      ok: false,
+      error: String(e?.message || e),
+    });
+  }
+});
 
 // 一覧
 app.get("/history/list", async (req, res) => {
