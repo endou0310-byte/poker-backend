@@ -702,45 +702,46 @@ app.post("/history/save", async (req, res) => {
 // ================================
 app.post("/history/update-conversation", async (req, res) => {
   try {
-    const { user_id, hand_id, conversation } = req.body || {};
+    const { id, conversation } = req.body || {};
 
-    if (!user_id || !hand_id || !Array.isArray(conversation)) {
-      return res.status(400).json({ ok: false, error: "bad_request" });
+    // バリデーション
+    if (!id || !Array.isArray(conversation)) {
+      return res.status(400).json({
+        ok: false,
+        error: "bad_request",
+      });
     }
 
-    // 既存 conversation を取得
-    const oldRes = await pool.query(
-      `SELECT conversation
-         FROM hand_histories
-        WHERE user_id = $1 AND hand_id = $2
-        ORDER BY id DESC
-        LIMIT 1`,
-      [user_id, hand_id]
+    // JSON 文字列にしてから jsonb として保存
+    const convJson = JSON.stringify(conversation);
+
+    const result = await pool.query(
+      `
+      UPDATE hand_histories
+         SET conversation = $1::jsonb
+       WHERE id = $2
+       RETURNING id
+      `,
+      [convJson, id]
     );
 
-    let oldConv = [];
-    if (oldRes.rowCount > 0 && Array.isArray(oldRes.rows[0].conversation)) {
-      oldConv = oldRes.rows[0].conversation;
+    if (result.rowCount === 0) {
+      // id が見つからない
+      return res.status(404).json({
+        ok: false,
+        error: "not_found",
+      });
     }
 
-    // 会話を追加結合
-    const newConv = [...oldConv, ...conversation];
-
-    // UPDATE
-    await pool.query(
-      `UPDATE hand_histories
-          SET conversation = $1
-        WHERE user_id = $2 AND hand_id = $3`,
-      [newConv, user_id, hand_id]
-    );
-
-    return res.json({ ok: true, conversation: newConv });
-  } catch (err) {
-    console.error("POST /history/update-conversation error:", err);
-    return res.status(500).json({ ok: false, error: "server_error" });
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error("[/history/update-conversation] error:", e);
+    return res.status(500).json({
+      ok: false,
+      error: String(e?.message || e),
+    });
   }
 });
-
 
 // 一覧
 app.get("/history/list", async (req, res) => {
