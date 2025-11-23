@@ -698,18 +698,53 @@ app.post("/history/save", async (req, res) => {
 });
 
 // ================================
-// conversation append API（★新規追加）
+// conversation append API（★修正）
 // ================================
 app.post("/history/update-conversation", async (req, res) => {
   try {
-    const { id, conversation } = req.body || {};
+    const { id, user_id, hand_id, conversation } = req.body || {};
 
-    // バリデーション
-    if (!id || !Array.isArray(conversation)) {
+    // conversation は必須で配列
+    if (!Array.isArray(conversation)) {
       return res.status(400).json({
         ok: false,
         error: "bad_request",
       });
+    }
+
+    let targetId = id ?? null;
+
+    // id が無い場合は user_id + hand_id から最新レコードを引く
+    if (!targetId) {
+      if (user_id && hand_id) {
+        const lookup = await pool.query(
+          `
+          SELECT id
+            FROM hand_histories
+           WHERE user_id = $1
+             AND hand_id = $2
+           ORDER BY created_at DESC
+           LIMIT 1
+          `,
+          [user_id, hand_id]
+        );
+
+        if (lookup.rowCount > 0) {
+          targetId = lookup.rows[0].id;
+        } else {
+          // まだ履歴が無い場合は「何もせず成功扱い」にしてフロントのエラーを防ぐ
+          return res.json({
+            ok: true,
+            skipped: true,
+            reason: "history_not_found",
+          });
+        }
+      } else {
+        return res.status(400).json({
+          ok: false,
+          error: "bad_request",
+        });
+      }
     }
 
     // JSON 文字列にしてから jsonb として保存
@@ -722,11 +757,11 @@ app.post("/history/update-conversation", async (req, res) => {
        WHERE id = $2
        RETURNING id
       `,
-      [convJson, id]
+      [convJson, targetId]
     );
 
     if (result.rowCount === 0) {
-      // id が見つからない
+      // id 指定で見つからない場合だけは 404 にする
       return res.status(404).json({
         ok: false,
         error: "not_found",
@@ -742,6 +777,7 @@ app.post("/history/update-conversation", async (req, res) => {
     });
   }
 });
+
 
 // 一覧
 app.get("/history/list", async (req, res) => {
