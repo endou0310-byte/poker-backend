@@ -662,6 +662,7 @@ app.post("/history/save", async (req, res) => {
       evaluation,
       conversation,
       markdown,
+      title, // ★ 追加（任意）
     } = req.body;
 
     // hand_id or handId のどちらかに値があれば OK
@@ -673,16 +674,23 @@ app.post("/history/save", async (req, res) => {
         .json({ ok: false, error: "missing_parameters" });
     }
 
+    // 初期タイトル（未指定なら Hand #hand_xxx 形式）
+    const initialTitle =
+      typeof title === "string" && title.trim()
+        ? title.trim()
+        : `Hand #${normalizedHandId}`;
+
     const result = await pool.query(
       `
       INSERT INTO hand_histories
-        (user_id, hand_id, snapshot, evaluation, conversation, markdown)
-      VALUES ($1, $2, $3, $4, $5, $6)
+        (user_id, hand_id, title, snapshot, evaluation, conversation, markdown)
+      VALUES ($1, $2, $3, $4, $5, $6, $7)
       RETURNING id
       `,
       [
         user_id,
         normalizedHandId,
+        initialTitle,
         snapshot ?? null,
         evaluation ?? null,
         conversation ?? null,
@@ -778,6 +786,41 @@ app.post("/history/update-conversation", async (req, res) => {
   }
 });
 
+// タイトル更新
+app.post("/history/update-title", async (req, res) => {
+  try {
+    const { user_id, id, title } = req.body || {};
+
+    if (!user_id || !id || typeof title !== "string") {
+      return res.status(400).json({ ok: false, error: "bad_request" });
+    }
+
+    const normalizedTitle = title.trim();
+    if (!normalizedTitle) {
+      return res.status(400).json({ ok: false, error: "empty_title" });
+    }
+
+    const result = await pool.query(
+      `
+      UPDATE hand_histories
+         SET title = $1
+       WHERE id = $2
+         AND user_id = $3
+       RETURNING id, hand_id, title, created_at
+      `,
+      [normalizedTitle, id, user_id]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ ok: false, error: "not_found" });
+    }
+
+    return res.json({ ok: true, history: result.rows[0] });
+  } catch (err) {
+    console.error("POST /history/update-title error:", err);
+    return res.status(500).json({ ok: false, error: "server_error" });
+  }
+});
 
 // 一覧
 app.get("/history/list", async (req, res) => {
@@ -789,7 +832,7 @@ app.get("/history/list", async (req, res) => {
 
     const result = await pool.query(
       `
-      SELECT id, hand_id, created_at, snapshot
+      SELECT id, hand_id, title, created_at, snapshot
       FROM hand_histories
       WHERE user_id = $1
       ORDER BY created_at DESC
