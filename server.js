@@ -32,8 +32,22 @@ const app = express();
 
 
 // ===== CORS =====
+// ローカル + 本番フロント（FRONTEND_URL）両方から叩けるようにする
+const allowedOrigins = ["http://localhost:5173"];
+if (FRONTEND_URL && !allowedOrigins.includes(FRONTEND_URL)) {
+  allowedOrigins.push(FRONTEND_URL);
+}
+
 const corsOptions = {
-  origin: "http://localhost:5173", // 開発中: フロントのオリジン
+  origin: function (origin, callback) {
+    // origin が undefined（curl など）のときは許可
+    if (!origin) return callback(null, true);
+
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error("Not allowed by CORS: " + origin));
+  },
   methods: ["GET", "POST", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
 };
