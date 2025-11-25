@@ -11,11 +11,19 @@ router.post('/google', async (req, res) => {
   const client = await pool.connect();
 
   try {
-    const { idToken } = req.body;
+    // login.html からは { id_token: ... } で送っているので両方対応する
+    const { idToken, id_token } = req.body || {};
+    const token = idToken || id_token;
+
+    if (!token) {
+      return res.status(400).json({
+        ok: false,
+        error: 'missing_id_token',
+      });
+    }
 
     // 1. プロフィール情報を用意する
     let profile;
-
     if (process.env.DEV_SKIP_GOOGLE_VERIFY === 'true') {
       // 開発用のダミーユーザー
       profile = {
@@ -27,7 +35,7 @@ router.post('/google', async (req, res) => {
 
     } else {
       // 本番・検証用：実際にGoogleのトークンを検証
-      profile = await verifyGoogleIdToken(idToken);
+      profile = await verifyGoogleIdToken(token);
       // profile は { sub, email, name } を返す想定
     }
 
