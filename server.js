@@ -32,16 +32,15 @@ const app = express();
 
 
 // ===== CORS =====
-// ローカル + 本番フロント（FRONTEND_URL）両方から叩けるようにする
-const allowedOrigins = ["http://localhost:5173"];
-if (FRONTEND_URL && !allowedOrigins.includes(FRONTEND_URL)) {
-  allowedOrigins.push(FRONTEND_URL);
-}
+// ローカル + GitHub Pages の "オリジン" を許可する
+const allowedOrigins = [
+  "http://localhost:5173",
+  "https://endou0310-byte.github.io",   // ← ここを固定で追加
+];
 
 const corsOptions = {
   origin: function (origin, callback) {
-    // origin が undefined（curl など）のときは許可
-    if (!origin) return callback(null, true);
+    if (!origin) return callback(null, true); // origin なしは許可
 
     if (allowedOrigins.includes(origin)) {
       return callback(null, true);
@@ -53,8 +52,7 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-// プリフライト(OPTIONS)も必ず同じ設定で返す
-// ※ Express v5 + path-to-regexp では "*" がエラーになるため、正規表現で全パスにマッチさせる
+// プリフライトも同じ設定で返す
 app.options(/.*/, cors(corsOptions));
 
 /**
