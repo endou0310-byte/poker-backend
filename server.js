@@ -47,7 +47,8 @@ const corsOptions = {
     }
     return callback(new Error("Not allowed by CORS: " + origin));
   },
-  methods: ["GET", "POST", "OPTIONS"],
+  // ← DELETE も許可する
+  methods: ["GET", "POST", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
 };
 
@@ -692,7 +693,91 @@ app.post("/followup", async (req, res) => {
 /* =============================
     hand history APIs
 =============================*/
+// 設定：ユーザー情報取得（default_stack 用）
+app.get("/settings/user_info", async (req, res) => {
+  try {
+    const { user_id } = req.query || {};
+    if (!user_id) {
+      return res.status(400).json({ ok: false, error: "bad_request" });
+    }
 
+    const result = await pool.query(
+      "SELECT default_stack FROM users WHERE id = $1",
+      [user_id]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ ok: false, error: "user_not_found" });
+    }
+
+    const row = result.rows[0];
+    // default_stack が NULL の場合はそのまま null を返す（フロント側で 100 にフォールバックでも OK）
+    return res.json({
+      ok: true,
+      default_stack: row.default_stack,
+    });
+  } catch (e) {
+    console.error("GET /settings/user_info error:", e);
+    return res.status(500).json({ ok: false, error: "server_error" });
+  }
+});
+
+// 設定：default_stack 更新
+app.post("/settings/update_default_stack", async (req, res) => {
+  try {
+    const { user_id, default_stack } = req.body || {};
+    if (!user_id) {
+      return res.status(400).json({ ok: false, error: "bad_request" });
+    }
+
+    const ds = Number(default_stack);
+    if (!Number.isFinite(ds)) {
+      return res
+        .status(400)
+        .json({ ok: false, error: "invalid_default_stack" });
+    }
+
+    const result = await pool.query(
+      "UPDATE users SET default_stack = $1 WHERE id = $2 RETURNING default_stack",
+      [ds, user_id]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ ok: false, error: "user_not_found" });
+    }
+
+    return res.json({
+      ok: true,
+      default_stack: result.rows[0].default_stack,
+    });
+  } catch (e) {
+    console.error("POST /settings/update_default_stack error:", e);
+    return res.status(500).json({ ok: false, error: "server_error" });
+  }
+});
+
+// 履歴の一括削除
+app.delete("/history/delete_all", async (req, res) => {
+  try {
+    const { user_id } = req.body || {};
+    if (!user_id) {
+      return res.status(400).json({ ok: false, error: "bad_request" });
+    }
+
+    const result = await pool.query(
+      "DELETE FROM hand_histories WHERE user_id = $1",
+      [user_id]
+    );
+
+    return res.json({
+      ok: true,
+      deleted_count: result.rowCount,
+    });
+  } catch (e) {
+    console.error("DELETE /history/delete_all error:", e);
+    return res.status(500).json({ ok: false, error: "server_error" });
+  }
+});
 // 保存
 app.post("/history/save", async (req, res) => {
   try {
