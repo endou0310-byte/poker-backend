@@ -925,6 +925,37 @@ app.get("/history/detail", async (req, res) => {
   }
 });
 
+// ================================
+// 履歴全削除 API（★新規追加）
+// ================================
+app.delete("/history/delete_all", async (req, res) => {
+  try {
+    const { user_id } = req.query;
+
+    if (!user_id) {
+      return res.status(400).json({
+        ok: false,
+        error: "missing_user_id",
+      });
+    }
+
+    const result = await pool.query(
+      `DELETE FROM hand_histories WHERE user_id = $1`,
+      [user_id]
+    );
+
+    return res.json({
+      ok: true,
+      deleted: result.rowCount,
+    });
+  } catch (err) {
+    console.error("DELETE /history/delete_all error:", err);
+    return res.status(500).json({
+      ok: false,
+      error: "server_error",
+    });
+  }
+});
 
 // ===== 起動 =====
 const PORT = process.env.PORT || 5000;
