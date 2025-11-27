@@ -32,10 +32,12 @@ const app = express();
 
 
 // ===== CORS =====
-// ローカル + GitHub Pages の "オリジン" を許可する
+// ローカル + 本番フロント（GitHub Pages / 独自ドメイン）の "オリジン" を許可する
 const allowedOrigins = [
   "http://localhost:5173",
-  "https://endou0310-byte.github.io",   // ← ここを固定で追加
+  "https://endou0310-byte.github.io", // 旧URL（残しておいてOK）
+  "https://pokeranalyzer.jp",         // ← 追加：独自ドメイン
+  "https://www.pokeranalyzer.jp",     // ← www を使う可能性があるなら追加
 ];
 
 const corsOptions = {
