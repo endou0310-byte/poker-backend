@@ -137,8 +137,65 @@ const planRouter = require("./src/routes/plan");
 
 app.use("/auth", authRouter);
 app.use("/plan", planRouter);
-// /history 系はこのファイルの後半で直書きしているので、
-// ここでの historyRouter は不要
+
+/* ============================================
+   即時サブスク解約（Stripe）
+   /plan/cancel
+============================================ */
+app.post("/plan/cancel", async (req, res) => {
+  try {
+    if (!stripe) {
+      return res.status(500).json({ ok: false, error: "stripe_not_configured" });
+    }
+
+    const { user_id } = req.body || {};
+    if (!user_id) {
+      return res.status(400).json({ ok: false, error: "missing_user_id" });
+    }
+
+    // DB から "active" なサブスクを取得
+    const subRes = await pool.query(
+      `
+      SELECT purchase_token
+      FROM subscriptions
+      WHERE user_id = $1
+        AND status = 'active'
+      ORDER BY started_at DESC
+      LIMIT 1
+      `,
+      [user_id]
+    );
+
+    if (subRes.rowCount === 0) {
+      return res.status(400).json({ ok: false, error: "no_active_subscription" });
+    }
+
+    const stripeSubId = subRes.rows[0].purchase_token;
+    if (!stripeSubId) {
+      return res.status(400).json({ ok: false, error: "missing_stripe_subscription_id" });
+    }
+
+    // ★ 即時キャンセル（Netflix型ではない）
+    await stripe.subscriptions.del(stripeSubId);
+
+    // ★ DB も即時終了扱いに変更
+    await pool.query(
+      `
+      UPDATE subscriptions
+         SET status = 'canceled'
+       WHERE user_id = $1
+         AND purchase_token = $2
+      `,
+      [user_id, stripeSubId]
+    );
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("/plan/cancel error:", err);
+    return res.status(500).json({ ok: false, error: "server_error" });
+  }
+});
+
 
 // ===== Stripe: Checkout セッション作成 =====
 app.post("/stripe/create-checkout-session", async (req, res) => {
