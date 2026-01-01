@@ -92,23 +92,49 @@ if (stripe) {
             // 基本的には metadata の plan を信頼する形にしておく
             const plan = planFromMeta;
 
-            if (userId && plan) {
-              await pool.query(
-                `INSERT INTO subscriptions
-                   (user_id, plan, status, store, started_at, purchase_token)
-                 VALUES ($1, $2, 'active', 'stripe', NOW(), $3)`,
-                [userId, plan, session.id]
-              );
-              console.log(
-                "[stripe/webhook] subscription inserted:",
-                userId,
-                plan
-              );
-            } else {
-              console.warn(
-                "[stripe/webhook] missing user_id or plan in metadata"
-              );
-            }
+if (userId && plan) {
+  const stripeSubId = session.subscription; // sub_...
+  if (!stripeSubId) {
+    console.warn("[stripe/webhook] missing session.subscription (sub_...)");
+    break;
+  }
+
+  // Stripe はWebhookをリトライするため、同一subscriptionの重複INSERTを防ぐ
+  const exists = await pool.query(
+    `SELECT 1 FROM subscriptions WHERE user_id = $1 AND purchase_token = $2 LIMIT 1`,
+    [userId, stripeSubId]
+  );
+
+  if (exists.rowCount === 0) {
+    // 既存activeがある場合はcanceledへ（activeを1つに揃える）
+    await pool.query(
+      `UPDATE subscriptions
+          SET status = 'canceled'
+        WHERE user_id = $1
+          AND status = 'active'
+          AND store = 'stripe'`,
+      [userId]
+    );
+
+    await pool.query(
+      `INSERT INTO subscriptions
+         (user_id, plan, status, store, started_at, purchase_token)
+       VALUES ($1, $2, 'active', 'stripe', NOW(), $3)`,
+      [userId, plan, stripeSubId]
+    );
+  }
+
+  console.log(
+    "[stripe/webhook] subscription recorded:",
+    userId,
+    plan,
+    stripeSubId
+  );
+} else {
+  console.warn(
+    "[stripe/webhook] missing user_id or plan in metadata"
+  );
+}
             break;
           }
 
@@ -211,13 +237,34 @@ app.post("/stripe/create-checkout-session", async (req, res) => {
       return res.status(400).json({ ok: false, error: "bad_request" });
     }
 
-    const priceId = PLAN_TO_PRICE[plan];
-    if (!priceId) {
-      return res.status(400).json({ ok: false, error: "unknown_plan" });
-    }
+const priceId = PLAN_TO_PRICE[plan];
+if (!priceId) {
+  return res.status(400).json({ ok: false, error: "unknown_plan" });
+}
 
-    const session = await stripe.checkout.sessions.create({
-      mode: "subscription",
+// すでに active のサブスクがある場合は二重課金を防ぐ
+const activeRes = await pool.query(
+  `
+  SELECT plan, started_at
+  FROM subscriptions
+  WHERE user_id = $1
+    AND status = 'active'
+  ORDER BY started_at DESC
+  LIMIT 1
+  `,
+  [user_id]
+);
+
+if (activeRes.rowCount > 0) {
+  return res.status(409).json({
+    ok: false,
+    error: "already_subscribed",
+    current_plan: activeRes.rows[0].plan,
+  });
+}
+
+const session = await stripe.checkout.sessions.create({
+  mode: "subscription",
       payment_method_types: ["card"],
       customer_email: email || undefined,
       line_items: [
