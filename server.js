@@ -4,14 +4,22 @@ const cors = require("cors");
 const pool = require("./src/db/pool");
 
 // ===== Stripe 設定 =====
-const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || "";
-const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || "";
+// Railway Variables で STRIPE_MODE を live / test に切り替える（外部入力では切り替えない）
+const STRIPE_MODE = (process.env.STRIPE_MODE || "live").toLowerCase();
+const STRIPE_ENV_SUFFIX = STRIPE_MODE === "test" ? "TEST" : "LIVE";
+
+// *_LIVE / *_TEST があれば優先、なければ従来のキー名（後方互換）を使う
+const pickEnv = (baseName) =>
+  process.env[`${baseName}_${STRIPE_ENV_SUFFIX}`] || process.env[baseName] || "";
+
+const STRIPE_SECRET_KEY = pickEnv("STRIPE_SECRET_KEY");
+const STRIPE_WEBHOOK_SECRET = pickEnv("STRIPE_WEBHOOK_SECRET");
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
 
-// プランごとの PriceID（Stripe ダッシュボードで発行したものを .env に入れる）
-const STRIPE_PRICE_BASIC = process.env.STRIPE_PRICE_BASIC || "";
-const STRIPE_PRICE_PRO = process.env.STRIPE_PRICE_PRO || "";
-const STRIPE_PRICE_PREMIUM = process.env.STRIPE_PRICE_PREMIUM || "";
+// プランごとの PriceID
+const STRIPE_PRICE_BASIC = pickEnv("STRIPE_PRICE_BASIC");
+const STRIPE_PRICE_PRO = pickEnv("STRIPE_PRICE_PRO");
+const STRIPE_PRICE_PREMIUM = pickEnv("STRIPE_PRICE_PREMIUM");
 
 // server 側で plan ↔ priceId を管理する
 const PLAN_TO_PRICE = {
@@ -28,6 +36,7 @@ const stripe =
     ? require("stripe")(STRIPE_SECRET_KEY)
     : null;
 
+console.log(`[stripe] mode=${STRIPE_MODE} key=${STRIPE_SECRET_KEY ? "set" : "missing"} whsec=${STRIPE_WEBHOOK_SECRET ? "set" : "missing"}`);
 const app = express();
 
 
