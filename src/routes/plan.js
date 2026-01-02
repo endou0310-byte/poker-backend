@@ -2,6 +2,27 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../db/pool');
 
+// ===== Stripe 設定（server.js と同様）=====
+const STRIPE_MODE = (process.env.STRIPE_MODE || "live").toLowerCase();
+const STRIPE_ENV_SUFFIX = STRIPE_MODE === "test" ? "TEST" : "LIVE";
+const pickEnv = (baseName) =>
+  process.env[`${baseName}_${STRIPE_ENV_SUFFIX}`] || process.env[baseName] || "";
+
+const STRIPE_SECRET_KEY = pickEnv("STRIPE_SECRET_KEY");
+const stripe = STRIPE_SECRET_KEY ? require("stripe")(STRIPE_SECRET_KEY) : null;
+
+const STRIPE_PRICE_BASIC = pickEnv("STRIPE_PRICE_BASIC");
+const STRIPE_PRICE_PRO = pickEnv("STRIPE_PRICE_PRO");
+const STRIPE_PRICE_PREMIUM = pickEnv("STRIPE_PRICE_PREMIUM");
+
+const PLAN_TO_PRICE = {
+  basic: STRIPE_PRICE_BASIC,
+  pro: STRIPE_PRICE_PRO,
+  premium: STRIPE_PRICE_PREMIUM,
+};
+
+const PLAN_RANK = { free: 0, basic: 1, pro: 2, premium: 3 };
+
 // プランごとのデフォルト設定
 // - limit_per_month: null の場合は「月間無制限」
 // - followups_per_hand: null の場合は「1ハンドあたり無制限」
@@ -34,6 +55,119 @@ function getMonthRange() {
   const end = new Date(now.getFullYear(), now.getMonth() + 1, 1, 0, 0, 0);
   return { start, end };
 }
+
+router.post("/change", async (req, res) => {
+  try {
+    if (!stripe) {
+      return res.status(500).json({ ok: false, error: "stripe_not_configured" });
+    }
+
+    const { user_id, new_plan } = req.body || {};
+    if (!user_id || !new_plan) {
+      return res.status(400).json({ ok: false, error: "bad_request" });
+    }
+
+    const newPriceId = PLAN_TO_PRICE[new_plan];
+    if (!newPriceId) {
+      return res.status(400).json({ ok: false, error: "unknown_plan" });
+    }
+
+    // いまの active をDBから取得（sub_... が purchase_token に入っている前提）
+    const subRes = await pool.query(
+      `
+      SELECT plan, purchase_token
+      FROM subscriptions
+      WHERE user_id = $1
+        AND status = 'active'
+        AND store = 'stripe'
+      ORDER BY started_at DESC
+      LIMIT 1
+      `,
+      [user_id]
+    );
+
+    if (subRes.rowCount === 0) {
+      return res.status(400).json({ ok: false, error: "no_active_subscription" });
+    }
+
+    const currentPlan = subRes.rows[0].plan;
+    const stripeSubId = subRes.rows[0].purchase_token;
+
+    if (!stripeSubId || !stripeSubId.startsWith("sub_")) {
+      return res.status(400).json({ ok: false, error: "missing_stripe_subscription_id" });
+    }
+
+    if (currentPlan === new_plan) {
+      return res.json({ ok: true, action: "noop", plan: currentPlan });
+    }
+
+    const currentRank = PLAN_RANK[currentPlan] ?? 0;
+    const newRank = PLAN_RANK[new_plan] ?? 0;
+
+    // Stripe subscription を取得して itemId を確定
+    const sub = await stripe.subscriptions.retrieve(stripeSubId);
+    const itemId = sub.items?.data?.[0]?.id;
+    if (!itemId) {
+      return res.status(500).json({ ok: false, error: "missing_subscription_item" });
+    }
+
+    // アップグレード：即時変更 + 差額日割り（更新日は維持）
+    if (newRank > currentRank) {
+      const updated = await stripe.subscriptions.update(stripeSubId, {
+        items: [{ id: itemId, price: newPriceId }],
+        proration_behavior: "create_prorations",
+      });
+
+      return res.json({
+        ok: true,
+        action: "upgraded",
+        from: currentPlan,
+        to: new_plan,
+        current_period_end: updated.current_period_end,
+      });
+    }
+
+    // ダウングレード：次回更新から反映（返金なし）＝ subscription schedule を使う
+    // 既存サイクル満了まで現在プランを維持し、次フェーズで new_plan に切替
+    const schedule = await stripe.subscriptionSchedules.create({
+      from_subscription: stripeSubId,
+    });
+
+    const currentPhase = schedule.phases?.[0];
+    const endDate = currentPhase?.end_date;
+    if (!endDate) {
+      return res.status(500).json({ ok: false, error: "missing_phase_end_date" });
+    }
+
+    const updatedSchedule = await stripe.subscriptionSchedules.update(schedule.id, {
+      phases: [
+        // 現在のフェーズはそのまま（満了まで）
+        {
+          items: currentPhase.items.map((it) => ({ price: it.price })),
+          start_date: currentPhase.start_date,
+          end_date: endDate,
+        },
+        // 次フェーズでダウングレード
+        {
+          items: [{ price: newPriceId }],
+          start_date: endDate,
+        },
+      ],
+    });
+
+    return res.json({
+      ok: true,
+      action: "downgrade_scheduled",
+      from: currentPlan,
+      to: new_plan,
+      effective_at: updatedSchedule.phases?.[1]?.start_date || endDate,
+    });
+  } catch (err) {
+    console.error("POST /plan/change error:", err);
+    return res.status(500).json({ ok: false, error: "server_error" });
+  }
+});
+
 
 router.get('/', async (req, res) => {
   const userId = req.query.user_id;
