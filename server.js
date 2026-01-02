@@ -31,12 +31,17 @@ const PRICE_TO_PLAN = Object.fromEntries(
   Object.entries(PLAN_TO_PRICE).map(([plan, price]) => [price, plan])
 );
 
+// プランの大小比較（アップグレード/ダウングレード判定に使用）
+const PLAN_RANK = { free: 0, basic: 1, pro: 2, premium: 3 };
+
 const stripe =
   STRIPE_SECRET_KEY && STRIPE_WEBHOOK_SECRET
     ? require("stripe")(STRIPE_SECRET_KEY)
     : null;
 
-console.log(`[stripe] mode=${STRIPE_MODE} key=${STRIPE_SECRET_KEY ? "set" : "missing"} whsec=${STRIPE_WEBHOOK_SECRET ? "set" : "missing"}`);
+console.log(
+  `[stripe] mode=${STRIPE_MODE} key=${STRIPE_SECRET_KEY ? "set" : "missing"} whsec=${STRIPE_WEBHOOK_SECRET ? "set" : "missing"}`
+);
 const app = express();
 
 
@@ -90,74 +95,101 @@ if (stripe) {
         return res.status(400).send(`Webhook Error: ${err.message}`);
       }
 
-      try {
-        switch (event.type) {
-          case "checkout.session.completed": {
-            const session = event.data.object;
-            const userId = session.metadata?.user_id;
-            const planFromMeta = session.metadata?.plan || null;
+try {
+  switch (event.type) {
 
-            // line_items は expand 指定がないと取れないので、
-            // 基本的には metadata の plan を信頼する形にしておく
-            const plan = planFromMeta;
+    case "checkout.session.completed": {
+      const session = event.data.object;
 
-if (userId && plan) {
-  const stripeSubId = session.subscription; // sub_...
-  if (!stripeSubId) {
-    console.warn("[stripe/webhook] missing session.subscription (sub_...)");
-    break;
-  }
+      const userId = session.metadata?.user_id;
+      const planFromMeta = session.metadata?.plan || null;
+      const stripeSubId = session.subscription; // sub_...
 
-  // Stripe はWebhookをリトライするため、同一subscriptionの重複INSERTを防ぐ
-  const exists = await pool.query(
-    `SELECT 1 FROM subscriptions WHERE user_id = $1 AND purchase_token = $2 LIMIT 1`,
-    [userId, stripeSubId]
-  );
+      if (userId && planFromMeta && stripeSubId) {
+        const exists = await pool.query(
+          `SELECT 1 FROM subscriptions
+           WHERE user_id = $1
+             AND purchase_token = $2
+             AND store = 'stripe'
+           LIMIT 1`,
+          [userId, stripeSubId]
+        );
 
-  if (exists.rowCount === 0) {
-    // 既存activeがある場合はcanceledへ（activeを1つに揃える）
-    await pool.query(
-      `UPDATE subscriptions
-          SET status = 'canceled'
-        WHERE user_id = $1
-          AND status = 'active'
-          AND store = 'stripe'`,
-      [userId]
-    );
+        if (exists.rowCount === 0) {
+          await pool.query(
+            `UPDATE subscriptions
+             SET status = 'canceled'
+             WHERE user_id = $1
+               AND status = 'active'
+               AND store = 'stripe'`,
+            [userId]
+          );
 
-    await pool.query(
-      `INSERT INTO subscriptions
-         (user_id, plan, status, store, started_at, purchase_token)
-       VALUES ($1, $2, 'active', 'stripe', NOW(), $3)`,
-      [userId, plan, stripeSubId]
-    );
-  }
-
-  console.log(
-    "[stripe/webhook] subscription recorded:",
-    userId,
-    plan,
-    stripeSubId
-  );
-} else {
-  console.warn(
-    "[stripe/webhook] missing user_id or plan in metadata"
-  );
-}
-            break;
-          }
-
-          // 今後必要なら invoice.payment_failed 等もここでハンドリング
-          default:
-            // 特に処理不要のイベントはそのまま流す
-            break;
+          await pool.query(
+            `INSERT INTO subscriptions
+              (user_id, plan, status, store, started_at, purchase_token)
+             VALUES ($1, $2, 'active', 'stripe', NOW(), $3)`,
+            [userId, planFromMeta, stripeSubId]
+          );
         }
-
-        res.json({ received: true });
-      } catch (err) {
-        console.error("[stripe/webhook] handler error:", err);
-        res.status(500).send("Webhook handler error");
       }
+      break;
+    }
+
+    case "customer.subscription.updated": {
+      const sub = event.data.object;
+      const stripeSubId = sub.id;
+
+      const priceId = sub.items?.data?.[0]?.price?.id || null;
+      const plan = priceId ? PRICE_TO_PLAN[priceId] : null;
+
+      if (!plan) break;
+
+      const link = await pool.query(
+        `SELECT user_id FROM subscriptions
+         WHERE purchase_token = $1 AND store = 'stripe'
+         ORDER BY started_at DESC LIMIT 1`,
+        [stripeSubId]
+      );
+
+      if (link.rowCount === 0) break;
+
+      const userId = link.rows[0].user_id;
+
+      await pool.query(
+        `UPDATE subscriptions
+         SET plan = $1
+         WHERE user_id = $2
+           AND purchase_token = $3
+           AND store = 'stripe'`,
+        [plan, userId, stripeSubId]
+      );
+      break;
+    }
+
+    case "customer.subscription.deleted": {
+      const sub = event.data.object;
+      const stripeSubId = sub.id;
+
+      await pool.query(
+        `UPDATE subscriptions
+         SET status = 'canceled'
+         WHERE purchase_token = $1
+           AND store = 'stripe'`,
+        [stripeSubId]
+      );
+      break;
+    }
+
+    default:
+      break;
+  }
+
+  res.json({ received: true });
+} catch (err) {
+  console.error("[stripe/webhook] handler error:", err);
+  res.status(500).send("Webhook handler error");
+}
     }
   );
 }
@@ -210,21 +242,18 @@ app.post("/plan/cancel", async (req, res) => {
       return res.status(400).json({ ok: false, error: "missing_stripe_subscription_id" });
     }
 
-    // ★ 即時キャンセル（Netflix型ではない）
-    await stripe.subscriptions.del(stripeSubId);
+const updated = await stripe.subscriptions.update(stripeSubId, {
+  cancel_at_period_end: true,
+});
 
-    // ★ DB も即時終了扱いに変更
-    await pool.query(
-      `
-      UPDATE subscriptions
-         SET status = 'canceled'
-       WHERE user_id = $1
-         AND purchase_token = $2
-      `,
-      [user_id, stripeSubId]
-    );
+// DBは即時にcanceledにしない（期間満了まで利用可のため）
+// 期間満了で Stripe 側が subscription.deleted を送るので、Webhookで status='canceled' へ。
 
-    return res.json({ ok: true });
+const currentPeriodEnd = updated.current_period_end
+  ? new Date(updated.current_period_end * 1000).toISOString()
+  : null;
+
+return res.json({ ok: true, cancel_at: currentPeriodEnd });
   } catch (err) {
     console.error("/plan/cancel error:", err);
     return res.status(500).json({ ok: false, error: "server_error" });
@@ -236,9 +265,7 @@ app.post("/plan/cancel", async (req, res) => {
 app.post("/stripe/create-checkout-session", async (req, res) => {
   try {
     if (!stripe) {
-      return res
-        .status(500)
-        .json({ ok: false, error: "stripe_not_configured" });
+      return res.status(500).json({ ok: false, error: "stripe_not_configured" });
     }
 
     const { user_id, email, plan } = req.body || {};
@@ -246,45 +273,41 @@ app.post("/stripe/create-checkout-session", async (req, res) => {
       return res.status(400).json({ ok: false, error: "bad_request" });
     }
 
-const priceId = PLAN_TO_PRICE[plan];
-if (!priceId) {
-  return res.status(400).json({ ok: false, error: "unknown_plan" });
-}
+    const priceId = PLAN_TO_PRICE[plan];
+    if (!priceId) {
+      return res.status(400).json({ ok: false, error: "unknown_plan" });
+    }
 
-// すでに active のサブスクがある場合は二重課金を防ぐ
-const activeRes = await pool.query(
-  `
-  SELECT plan, started_at
-  FROM subscriptions
-  WHERE user_id = $1
-    AND status = 'active'
-  ORDER BY started_at DESC
-  LIMIT 1
-  `,
-  [user_id]
-);
+    // すでに active のサブスクがある場合は二重課金を防ぐ（Stripeのみ対象にする）
+    const activeRes = await pool.query(
+      `
+      SELECT plan
+      FROM subscriptions
+      WHERE user_id = $1
+        AND status = 'active'
+        AND store = 'stripe'
+      ORDER BY started_at DESC
+      LIMIT 1
+      `,
+      [user_id]
+    );
 
-if (activeRes.rowCount > 0) {
-  return res.status(409).json({
-    ok: false,
-    error: "already_subscribed",
-    current_plan: activeRes.rows[0].plan,
-  });
-}
+    if (activeRes.rowCount > 0) {
+      return res.status(409).json({
+        ok: false,
+        error: "already_subscribed",
+        current_plan: activeRes.rows[0].plan,
+      });
+    }
 
-const session = await stripe.checkout.sessions.create({
-  mode: "subscription",
-      payment_method_types: ["card"],
-      customer_email: email || undefined,
-      line_items: [
-        {
-          price: priceId,
-          quantity: 1,
-        },
-      ],
+    const session = await stripe.checkout.sessions.create({
+      mode: "subscription",
+      line_items: [{ price: priceId, quantity: 1 }],
+      ...(email ? { customer_email: email } : {}),
       metadata: {
-        user_id,
-        plan,
+        user_id: String(user_id),
+        plan: String(plan),
+        stripe_mode: String(STRIPE_MODE),
       },
       success_url: `${FRONTEND_URL}/stripe-success.html?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${FRONTEND_URL}/stripe-cancel.html`,
@@ -293,12 +316,9 @@ const session = await stripe.checkout.sessions.create({
     return res.json({ ok: true, url: session.url });
   } catch (err) {
     console.error("[/stripe/create-checkout-session] error:", err);
-    return res
-      .status(500)
-      .json({ ok: false, error: "stripe_session_error" });
+    return res.status(500).json({ ok: false, error: "stripe_session_error" });
   }
 });
-
 
 // ===== healthcheck =====
 app.get("/health", (_req, res) => {
