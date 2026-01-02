@@ -34,10 +34,7 @@ const PRICE_TO_PLAN = Object.fromEntries(
 // プランの大小比較（アップグレード/ダウングレード判定に使用）
 const PLAN_RANK = { free: 0, basic: 1, pro: 2, premium: 3 };
 
-const stripe =
-  STRIPE_SECRET_KEY && STRIPE_WEBHOOK_SECRET
-    ? require("stripe")(STRIPE_SECRET_KEY)
-    : null;
+const stripe = STRIPE_SECRET_KEY ? require("stripe")(STRIPE_SECRET_KEY) : null;
 
 console.log(
   `[stripe] mode=${STRIPE_MODE} key=${STRIPE_SECRET_KEY ? "set" : "missing"} whsec=${STRIPE_WEBHOOK_SECRET ? "set" : "missing"}`
@@ -76,7 +73,8 @@ app.options(/.*/, cors(corsOptions));
  * Stripe Webhook（raw body が必要なので express.json より前に定義）
  * ここでは checkout.session.completed が来たら subscriptions に active プランを登録します。
  */
-if (stripe) {
+// ===== Stripe Webhook（raw body が必要なので express.json より前に定義）=====
+if (stripe && STRIPE_WEBHOOK_SECRET) {
   app.post(
     "/stripe/webhook",
     express.raw({ type: "application/json" }),
@@ -95,107 +93,106 @@ if (stripe) {
         return res.status(400).send(`Webhook Error: ${err.message}`);
       }
 
-try {
-  switch (event.type) {
+      try {
+        switch (event.type) {
+          case "checkout.session.completed": {
+            const session = event.data.object;
 
-    case "checkout.session.completed": {
-      const session = event.data.object;
+            const userId = session.metadata?.user_id;
+            const planFromMeta = session.metadata?.plan || null;
+            const stripeSubId = session.subscription; // sub_...
 
-      const userId = session.metadata?.user_id;
-      const planFromMeta = session.metadata?.plan || null;
-      const stripeSubId = session.subscription; // sub_...
+            if (userId && planFromMeta && stripeSubId) {
+              const exists = await pool.query(
+                `SELECT 1 FROM subscriptions
+                 WHERE user_id = $1
+                   AND purchase_token = $2
+                   AND store = 'stripe'
+                 LIMIT 1`,
+                [userId, stripeSubId]
+              );
 
-      if (userId && planFromMeta && stripeSubId) {
-        const exists = await pool.query(
-          `SELECT 1 FROM subscriptions
-           WHERE user_id = $1
-             AND purchase_token = $2
-             AND store = 'stripe'
-           LIMIT 1`,
-          [userId, stripeSubId]
-        );
+              if (exists.rowCount === 0) {
+                await pool.query(
+                  `UPDATE subscriptions
+                   SET status = 'canceled'
+                   WHERE user_id = $1
+                     AND status = 'active'
+                     AND store = 'stripe'`,
+                  [userId]
+                );
 
-        if (exists.rowCount === 0) {
-          await pool.query(
-            `UPDATE subscriptions
-             SET status = 'canceled'
-             WHERE user_id = $1
-               AND status = 'active'
-               AND store = 'stripe'`,
-            [userId]
-          );
+                await pool.query(
+                  `INSERT INTO subscriptions
+                    (user_id, plan, status, store, started_at, purchase_token)
+                   VALUES ($1, $2, 'active', 'stripe', NOW(), $3)`,
+                  [userId, planFromMeta, stripeSubId]
+                );
+              }
+            }
+            break;
+          }
 
-          await pool.query(
-            `INSERT INTO subscriptions
-              (user_id, plan, status, store, started_at, purchase_token)
-             VALUES ($1, $2, 'active', 'stripe', NOW(), $3)`,
-            [userId, planFromMeta, stripeSubId]
-          );
+          case "customer.subscription.updated": {
+            const sub = event.data.object;
+            const stripeSubId = sub.id;
+
+            const priceId = sub.items?.data?.[0]?.price?.id || null;
+            const plan = priceId ? PRICE_TO_PLAN[priceId] : null;
+
+            if (!plan) break;
+
+            const link = await pool.query(
+              `SELECT user_id FROM subscriptions
+               WHERE purchase_token = $1 AND store = 'stripe'
+               ORDER BY started_at DESC LIMIT 1`,
+              [stripeSubId]
+            );
+            if (link.rowCount === 0) break;
+
+            const userId = link.rows[0].user_id;
+
+            await pool.query(
+              `UPDATE subscriptions
+               SET plan = $1
+               WHERE user_id = $2
+                 AND purchase_token = $3
+                 AND store = 'stripe'`,
+              [plan, userId, stripeSubId]
+            );
+            break;
+          }
+
+          case "customer.subscription.deleted": {
+            const sub = event.data.object;
+            const stripeSubId = sub.id;
+
+            await pool.query(
+              `UPDATE subscriptions
+               SET status = 'canceled'
+               WHERE purchase_token = $1
+                 AND store = 'stripe'`,
+              [stripeSubId]
+            );
+            break;
+          }
+
+          default:
+            break;
         }
+
+        return res.json({ received: true });
+      } catch (err) {
+        console.error("[stripe/webhook] handler error:", err);
+        return res.status(500).send("Webhook handler error");
       }
-      break;
-    }
-
-    case "customer.subscription.updated": {
-      const sub = event.data.object;
-      const stripeSubId = sub.id;
-
-      const priceId = sub.items?.data?.[0]?.price?.id || null;
-      const plan = priceId ? PRICE_TO_PLAN[priceId] : null;
-
-      if (!plan) break;
-
-      const link = await pool.query(
-        `SELECT user_id FROM subscriptions
-         WHERE purchase_token = $1 AND store = 'stripe'
-         ORDER BY started_at DESC LIMIT 1`,
-        [stripeSubId]
-      );
-
-      if (link.rowCount === 0) break;
-
-      const userId = link.rows[0].user_id;
-
-      await pool.query(
-        `UPDATE subscriptions
-         SET plan = $1
-         WHERE user_id = $2
-           AND purchase_token = $3
-           AND store = 'stripe'`,
-        [plan, userId, stripeSubId]
-      );
-      break;
-    }
-
-    case "customer.subscription.deleted": {
-      const sub = event.data.object;
-      const stripeSubId = sub.id;
-
-      await pool.query(
-        `UPDATE subscriptions
-         SET status = 'canceled'
-         WHERE purchase_token = $1
-           AND store = 'stripe'`,
-        [stripeSubId]
-      );
-      break;
-    }
-
-    default:
-      break;
-  }
-
-  res.json({ received: true });
-} catch (err) {
-  console.error("[stripe/webhook] handler error:", err);
-  res.status(500).send("Webhook handler error");
-}
     }
   );
 }
 
 // ===== JSON =====
 app.use(express.json());
+
 
 
 // ===== 既存ルータ(auth / me) =====
@@ -225,10 +222,11 @@ app.post("/plan/cancel", async (req, res) => {
       `
       SELECT purchase_token
       FROM subscriptions
-      WHERE user_id = $1
-        AND status = 'active'
-      ORDER BY started_at DESC
-      LIMIT 1
+WHERE user_id = $1
+  AND status = 'active'
+  AND store = 'stripe'
+ORDER BY started_at DESC
+LIMIT 1
       `,
       [user_id]
     );
@@ -352,11 +350,11 @@ const PLAN_CONFIG = {
     followups_per_hand: 3,
     ads_enabled: false,
   },
-  pro: {
-    limit_per_month: 100,
-    followups_per_hand: 10,
-    ads_enabled: false,
-  },
+pro: {
+  limit_per_month: 100,
+  followups_per_hand: 3,
+  ads_enabled: false,
+},
   premium: {
     limit_per_month: null, // 無制限
     followups_per_hand: null, // 無制限
@@ -1182,5 +1180,3 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`API server listening on port ${PORT}`);
 });
-
-
