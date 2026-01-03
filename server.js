@@ -318,6 +318,61 @@ app.post("/stripe/create-checkout-session", async (req, res) => {
   }
 });
 
+// ===== Stripe: Billing Portal セッション作成 =====
+app.post("/stripe/create-portal-session", async (req, res) => {
+  try {
+    if (!stripe) {
+      return res.status(500).json({ ok: false, error: "stripe_not_configured" });
+    }
+
+    const { user_id } = req.body || {};
+    if (!user_id) {
+      return res.status(400).json({ ok: false, error: "bad_request" });
+    }
+
+    // DBから現在のStripeサブスクID（sub_...）を取得
+    const subRes = await pool.query(
+      `
+      SELECT purchase_token
+      FROM subscriptions
+      WHERE user_id = $1
+        AND status = 'active'
+        AND store = 'stripe'
+      ORDER BY started_at DESC
+      LIMIT 1
+      `,
+      [user_id]
+    );
+
+    if (subRes.rowCount === 0) {
+      return res.status(404).json({ ok: false, error: "no_active_subscription" });
+    }
+
+    const stripeSubId = subRes.rows[0].purchase_token;
+    if (!stripeSubId || !String(stripeSubId).startsWith("sub_")) {
+      return res.status(500).json({ ok: false, error: "invalid_subscription_id" });
+    }
+
+    // Stripeからcustomerを取得してBilling Portalを発行
+    const subscription = await stripe.subscriptions.retrieve(String(stripeSubId));
+    const customerId = subscription?.customer;
+
+    if (!customerId) {
+      return res.status(500).json({ ok: false, error: "customer_not_found" });
+    }
+
+    const session = await stripe.billingPortal.sessions.create({
+      customer: String(customerId),
+      return_url: `${FRONTEND_URL}/`,
+    });
+
+    return res.json({ ok: true, url: session.url });
+  } catch (err) {
+    console.error("[/stripe/create-portal-session] error:", err);
+    return res.status(500).json({ ok: false, error: "portal_session_error" });
+  }
+});
+
 // ===== healthcheck =====
 app.get("/health", (_req, res) => {
   res.json({
