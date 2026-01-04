@@ -27,9 +27,14 @@ const PLAN_TO_PRICE = {
   pro: STRIPE_PRICE_PRO,
   premium: STRIPE_PRICE_PREMIUM,
 };
+
+// 空の priceId は除外して逆引きを作る
 const PRICE_TO_PLAN = Object.fromEntries(
-  Object.entries(PLAN_TO_PRICE).map(([plan, price]) => [price, plan])
+  Object.entries(PLAN_TO_PRICE)
+    .filter(([, price]) => typeof price === "string" && price.trim())
+    .map(([plan, price]) => [price, plan])
 );
+
 
 // プランの大小比較（アップグレード/ダウングレード判定に使用）
 const PLAN_RANK = { free: 0, basic: 1, pro: 2, premium: 3 };
@@ -594,15 +599,7 @@ EV評価セクションでは、次の3ブロックをこの順番で必ず含�
 
 // ===== /analyze: ハンド解析 =====
 
-// CORS プリフライト対応
-app.options("/analyze", (_req, res) => {
-  res.set({
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
-  });
-  res.status(204).end();
-});
+
 
 app.post("/analyze", async (req, res) => {
   const payload = req.body || {};
@@ -945,28 +942,7 @@ app.post("/settings/update_default_stack", async (req, res) => {
   }
 });
 
-// 履歴の一括削除
-app.delete("/history/delete_all", async (req, res) => {
-  try {
-    const { user_id } = req.body || {};
-    if (!user_id) {
-      return res.status(400).json({ ok: false, error: "bad_request" });
-    }
 
-    const result = await pool.query(
-      "DELETE FROM hand_histories WHERE user_id = $1",
-      [user_id]
-    );
-
-    return res.json({
-      ok: true,
-      deleted_count: result.rowCount,
-    });
-  } catch (e) {
-    console.error("DELETE /history/delete_all error:", e);
-    return res.status(500).json({ ok: false, error: "server_error" });
-  }
-});
 // 保存
 app.post("/history/save", async (req, res) => {
   try {
@@ -1199,9 +1175,7 @@ app.get("/history/detail", async (req, res) => {
   }
 });
 
-// ================================
-// 履歴全削除 API（★新規追加）
-// ================================
+// 履歴全削除 API（統一版）
 app.delete("/history/delete_all", async (req, res) => {
   try {
     const { user_id } = req.query;
@@ -1230,6 +1204,7 @@ app.delete("/history/delete_all", async (req, res) => {
     });
   }
 });
+
 
 // ===== 起動 =====
 const PORT = process.env.PORT || 5000;
