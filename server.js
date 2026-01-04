@@ -732,15 +732,16 @@ app.post("/analyze", async (req, res) => {
     }
 
     // ここでは JSON にパースせず、テキストとしてそのまま返す
-    return res.json({
-      ok: true,
-      text: content,
-      usage: {
-        plan: planInfo.plan,
-        limit_per_month: limitPerMonth,
-        used_this_month: usedThisMonth,
-      },
-    });
+return res.json({
+  ok: true,
+  evaluation: { markdown: content },
+  markdown: content,
+  usage: {
+    plan: planInfo.plan,
+    limit_per_month: limitPerMonth,
+    used_this_month: usedThisMonth,
+  },
+});
   } catch (e) {
     console.error("[/analyze] server exception:", e);
     return res.status(500).json({
