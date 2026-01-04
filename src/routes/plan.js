@@ -118,13 +118,13 @@ router.post("/change", async (req, res) => {
         proration_behavior: "create_prorations",
       });
 
-      return res.json({
-        ok: true,
-        action: "upgraded",
-        from: currentPlan,
-        to: new_plan,
-        current_period_end: updated.current_period_end,
-      });
+return res.json({
+  ok: true,
+  action: "upgrade",
+  from: currentPlan,
+  to: new_plan,
+  current_period_end: updated.current_period_end,
+});
     }
 
     // ダウングレード：次回更新から反映（返金なし）＝ subscription schedule を使う
